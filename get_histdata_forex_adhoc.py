@@ -202,8 +202,7 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
         try:
             cursor.execute(f"""
                 UPDATE {source_table}
-                SET process_flag = 'N',
-                    last_processed = GETDATE()
+                SET process_flag = 'N'
                 WHERE symbol = ?
             """, (symbol,))
             conn.commit()

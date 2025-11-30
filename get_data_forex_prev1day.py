@@ -30,7 +30,7 @@ try:
     cursor.execute(f"""
         SELECT symbol, currency_from, currency_to, yfinance_symbol 
         FROM {source_table} 
-        WHERE is_active = 1
+        WHERE is_active = 'Y'
         ORDER BY symbol
     """)
     forex_symbols = cursor.fetchall()

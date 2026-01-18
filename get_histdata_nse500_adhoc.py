@@ -1,4 +1,4 @@
-# this py script meant to import last 250 days of data for NSE scripts 
+# this py script meant to import last 1000 days of data for NSE scripts 
 import yfinance as yf
 import pandas as pd
 import pyodbc
@@ -52,14 +52,14 @@ if not nse500_tickers:
     print("❌ No tickers found in the database. Please check your NSE-500 table.")
     exit()
 
-# ✅ Loop through each ticker and fetch last 250 days of data
+# ✅ Loop through each ticker and fetch last 1000 days of data
 for ticker, company_name in nse500_tickers:
-    print(f"Fetching data for {ticker} (last 250 days)...")
+    print(f"Fetching data for {ticker} (last 1000 days)...")
     
     stock = yf.Ticker(ticker)
 
-    # Get stock history (last 250 days, interval: 1 day)
-    data = stock.history(period="250d", interval="1d")
+    # Get stock history (last 1000 days, interval: 1 day)
+    data = stock.history(period="1000d", interval="1d")
     
     if data.empty:
         print(f"⚠ No data found for {ticker}. Skipping...")
@@ -78,8 +78,17 @@ for ticker, company_name in nse500_tickers:
         INSERT INTO {target_table} (trading_date, open_price, high_price, low_price, close_price, volume, dividend, stocksplit, ticker, company)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        cursor.execute(insert_query, row['trading_date'], row['Open'], row['High'], row['Low'], row['Close'],
-                       row['Volume'], row['Dividends'], row['Stock Splits'], row['Ticker'], row['Company'])
+        # Convert values to string and handle NaN/None values
+        open_val = str(row['Open']) if pd.notna(row['Open']) else None
+        high_val = str(row['High']) if pd.notna(row['High']) else None
+        low_val = str(row['Low']) if pd.notna(row['Low']) else None
+        close_val = str(row['Close']) if pd.notna(row['Close']) else None
+        volume_val = str(row['Volume']) if pd.notna(row['Volume']) else None
+        div_val = str(row['Dividends']) if pd.notna(row['Dividends']) else None
+        split_val = str(row['Stock Splits']) if pd.notna(row['Stock Splits']) else None
+        
+        cursor.execute(insert_query, row['trading_date'], open_val, high_val, low_val, close_val,
+                       volume_val, div_val, split_val, row['Ticker'], row['Company'])
 
     conn.commit()
     print(f"✅ Data for {ticker} inserted successfully.")

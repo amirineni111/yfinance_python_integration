@@ -1,4 +1,4 @@
-# this PY script meant to import last 250 days of data for all NASDAQ 100 stocks
+# this PY script meant to import last 1000 days of data for all NASDAQ 100 stocks
 import yfinance as yf
 import pandas as pd
 import pyodbc
@@ -52,14 +52,14 @@ if not nasdaq100_tickers:
     print("❌ No tickers found in the database. Please check your NASDAQ-100 table.")
     exit()
 
-# ✅ Loop through each ticker and fetch last 250 days of data
+# ✅ Loop through each ticker and fetch last 1000 days of data
 for ticker, company_name in nasdaq100_tickers:
-    print(f"Fetching data for {ticker} (last 250 days)...")
+    print(f"Fetching data for {ticker} (last 1000 days)...")
     
     stock = yf.Ticker(ticker)
 
-    # Get stock history (last 250 days, interval: 1 day)
-    data = stock.history(period="250d", interval="1d")
+    # Get stock history (last 1000 days, interval: 1 day)
+    data = stock.history(period="1000d", interval="1d")
     
     if data.empty:
         print(f"⚠ No data found for {ticker}. Skipping...")

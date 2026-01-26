@@ -23,6 +23,6 @@ if %ERRORLEVEL% EQU 0 (
     echo ========================================
 )
 
-echo.
-echo Press any key to exit...
-pause > nul
+REM echo.
+REM echo Press any key to exit...
+REM pause > nul

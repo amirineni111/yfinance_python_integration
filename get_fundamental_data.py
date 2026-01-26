@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import pyodbc
 from datetime import datetime
+import time
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
@@ -251,22 +252,26 @@ print("\n📊 Fetching NSE 500 fundamental data...")
 cursor.execute("SELECT ticker, company_name FROM nse_500")
 nse_tickers = cursor.fetchall()
 
-for ticker, company_name in nse_tickers:
-    print(f"Fetching fundamentals for {ticker}...")
+total_nse = len(nse_tickers)
+for idx, (ticker, company_name) in enumerate(nse_tickers, 1):
+    print(f"[{idx}/{total_nse}] Fetching fundamentals for {ticker}...")
     fundamentals = fetch_fundamentals(ticker)
     insert_fundamentals(ticker, company_name, fundamentals, 'nse_500_fundamentals')
     print(f"✅ {ticker} fundamentals saved.")
+    time.sleep(1)  # Add 1 second delay to avoid rate limiting
 
 # ✅ Process NASDAQ 100 stocks
 print("\n📊 Fetching NASDAQ 100 fundamental data...")
 cursor.execute("SELECT ticker, company_name FROM nasdaq_top100")
 nasdaq_tickers = cursor.fetchall()
 
-for ticker, company_name in nasdaq_tickers:
-    print(f"Fetching fundamentals for {ticker}...")
+total_nasdaq = len(nasdaq_tickers)
+for idx, (ticker, company_name) in enumerate(nasdaq_tickers, 1):
+    print(f"[{idx}/{total_nasdaq}] Fetching fundamentals for {ticker}...")
     fundamentals = fetch_fundamentals(ticker)
     insert_fundamentals(ticker, company_name, fundamentals, 'nasdaq_100_fundamentals')
     print(f"✅ {ticker} fundamentals saved.")
+    time.sleep(1)  # Add 1 second delay to avoid rate limiting
 
 # ✅ Close connection
 cursor.close()

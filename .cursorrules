@@ -1,0 +1,29 @@
+# Cursor Rules — stockanalysis
+
+## Project
+Data ingestion ETL. Fetches NASDAQ 100 + NSE 500 + Forex prices and fundamentals → SQL Server.
+
+## Stack
+- Python 3.11+, yfinance, pandas, pyodbc, alpha_vantage
+- SQL Server (localhost\MSSQLSERVER01, stockdata_db, Windows Auth)
+
+## Architecture
+- fetch_nasdaq_data.py → nasdaq_100_hist_data (VARCHAR prices!)
+- fetch_nse_data.py → nse_500_hist_data (VARCHAR prices!)
+- fetch_forex_data.py → forex_hist_data (DECIMAL prices)
+- fetch_fundamentals.py → *_fundamentals tables
+- sql_loader.py → Generic bulk loader
+- manage_tickers.py → Ticker master list management
+
+## Critical Notes
+- Equity prices stored as VARCHAR — ALL downstream MUST CAST to FLOAT
+- Forex prices stored as DECIMAL — no casting needed
+- Alpha Vantage: 5 calls/min free tier rate limit
+- Upsert on ticker + trading_date prevents duplicates
+
+## Unused (ignore)
+- dags/ — Legacy Airflow DAGs
+- Snowflake/DataHub references — dead code
+
+## Ecosystem
+Foundation layer for 7-repo platform. Every other repo depends on data loaded here. If ingestion fails, entire pipeline breaks.

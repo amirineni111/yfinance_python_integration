@@ -13,7 +13,7 @@ This is the **data ingestion ETL layer** — one of **7 interconnected repositor
 | Layer | Repo | Purpose |
 |-------|------|---------|
 | **Data Ingestion** ⭐ | **`stockanalysis`** | **THIS REPO** — ETL: yfinance/Alpha Vantage → SQL Server |
-| SQL Infrastructure | `sqlserver_mcp` | .NET 8 MCP Server for AI IDE ↔ SQL Server |
+| SQL Infrastructure | `sqlserver_mcp` | .NET 8 MCP Server (Microsoft MssqlMcp) — 7 tools (ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData) via stdio transport for AI IDE ↔ SQL Server |
 | Dashboard | `streamlit-trading-dashboard` | 40+ views, signal tracking, Streamlit UI |
 | ML: NASDAQ | `sqlserver_copilot` | Gradient Boosting → `ml_trading_predictions` |
 | ML: NSE | `sqlserver_copilot_nse` | 5-model ensemble → `ml_nse_trading_predictions` |
@@ -134,9 +134,9 @@ Some code references Snowflake or DataHub that were explored but never implement
 ## 6. DATABASE CONTEXT
 
 ### Connection
-- **Server**: `localhost\MSSQLSERVER01`
+- **Server**: `192.168.87.27\MSSQLSERVER01` (Machine A LAN IP)
 - **Database**: `stockdata_db`
-- **Auth**: Windows Integrated
+- **Auth**: SQL Auth (`remote_user`, `SQL_TRUSTED_CONNECTION=no`)
 
 ### This Repo's Role
 This is the **ONLY repo that performs bulk data insertion** for market data and fundamentals. All other repos either:
@@ -179,6 +179,27 @@ Every other repo depends on this one for base data:
 - **sqlserver_copilot_forex** — Reads `forex_hist_data` for ML training
 - **streamlit-trading-dashboard** — Reads all market data tables for visualization + creates views
 - **stockdata_agenticai** — Queries market data via predefined SQL
-- **sqlserver_mcp** — Exposes all tables to AI IDEs
+- **sqlserver_mcp** — Exposes all tables to AI IDEs (7 MCP tools: ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData)
 
 If data ingestion fails, the ENTIRE pipeline is affected.
+
+---
+
+## 9. MCP SERVER FOR DEVELOPMENT
+
+The `sqlserver_mcp` repo provides an MCP server for AI IDEs to query `stockdata_db` directly during development.
+
+### VS Code Configuration
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=192.168.87.27\\MSSQLSERVER01;Database=stockdata_db;User Id=remote_user;Password=YourStrongPassword123!;TrustServerCertificate=True"
+    }
+}
+```
+
+### 7 MCP Tools: ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData
+
+Useful for: verifying data freshness after ETL runs, checking row counts, exploring ticker master tables, validating `market_context_daily` data.

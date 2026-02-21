@@ -20,7 +20,7 @@ External APIs
   sql_loader.py (bulk insert to SQL Server)
         │
         ▼
-  stockdata_db (localhost\MSSQLSERVER01)
+  stockdata_db (192.168.87.27\MSSQLSERVER01)
 ```
 
 ## Critical Data Note

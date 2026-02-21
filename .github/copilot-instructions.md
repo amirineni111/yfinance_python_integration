@@ -35,4 +35,17 @@ This is the **data ingestion ETL layer** — the foundation of a 7-repo stock tr
 - `sqlserver_copilot_forex` — Forex ML training
 - `streamlit-trading-dashboard` — Visualization + views
 - `stockdata_agenticai` — CrewAI agents
-- `sqlserver_mcp` — MCP bridge for AI IDEs
+- `sqlserver_mcp` — .NET 8 MCP Server (Microsoft MssqlMcp) with 7 tools: ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData. Stdio transport. Use to explore DB schemas and verify data freshness during development.
+
+## MCP Server for Development
+Configure in `.vscode/mcp.json` to query stockdata_db directly from your AI IDE:
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+}
+```
+Useful for: verifying data freshness after ETL runs, checking row counts in hist tables, exploring ticker master data.

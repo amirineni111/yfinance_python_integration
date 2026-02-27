@@ -142,17 +142,32 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
         print(f"  ❌ Error fetching data: {e}")
         return None
 
-# Calculate previous trading day (skip weekends)
+# Calculate target trading day: try today first, fallback to previous trading day
 today = datetime.now()
-if today.weekday() == 0:  # Monday
-    prev_day = today - timedelta(days=3)  # Friday
-elif today.weekday() == 6:  # Sunday
-    prev_day = today - timedelta(days=2)  # Friday
-else:
-    prev_day = today - timedelta(days=1)
 
-prev_day_str = prev_day.strftime('%Y-%m-%d')
-print(f"📅 Fetching data for: {prev_day_str}")
+# Primary target is today (forex daily bar closes at 5 PM EST)
+target_day = today
+
+# If weekend, adjust to Friday
+if today.weekday() == 5:  # Saturday
+    target_day = today - timedelta(days=1)  # Friday
+elif today.weekday() == 6:  # Sunday
+    target_day = today - timedelta(days=2)  # Friday
+
+# Fallback: previous trading day (in case API hasn't updated yet)
+if today.weekday() == 0:  # Monday
+    fallback_day = today - timedelta(days=3)  # Friday
+elif today.weekday() == 6:  # Sunday
+    fallback_day = today - timedelta(days=2)  # Friday
+elif today.weekday() == 5:  # Saturday
+    fallback_day = today - timedelta(days=1)  # Friday
+else:
+    fallback_day = today - timedelta(days=1)
+
+target_day_str = target_day.strftime('%Y-%m-%d')
+fallback_day_str = fallback_day.strftime('%Y-%m-%d')
+print(f"📅 Primary target date: {target_day_str}")
+print(f"📅 Fallback date: {fallback_day_str}")
 
 # Process each forex pair
 success_count = 0
@@ -162,8 +177,12 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
     try:
         print(f"\n[{idx}/{len(forex_symbols)}] 🔄 Processing {symbol} ({currency_from}/{currency_to})...")
         
-        # Fetch data from Alpha Vantage
-        forex_data = fetch_forex_latest(currency_from, currency_to, ALPHA_VANTAGE_KEY, prev_day.date())
+        # Fetch data from Alpha Vantage — try today first, fallback to previous day
+        forex_data = fetch_forex_latest(currency_from, currency_to, ALPHA_VANTAGE_KEY, target_day.date())
+        
+        if not forex_data and target_day.date() != fallback_day.date():
+            print(f"  ℹ️  Today's data not available yet, trying fallback date {fallback_day_str}...")
+            forex_data = fetch_forex_latest(currency_from, currency_to, ALPHA_VANTAGE_KEY, fallback_day.date())
         
         if not forex_data:
             print(f"  ⚠️  No data found for {symbol}. Skipping...")
@@ -260,6 +279,6 @@ print("📊 FOREX DATA UPDATE SUMMARY (Alpha Vantage API)")
 print("="*60)
 print(f"✅ Successfully processed: {success_count} records")
 print(f"❌ Errors: {error_count} records")
-print(f"📅 Date: {prev_day_str}")
+print(f"📅 Target date: {target_day_str} | Fallback: {fallback_day_str}")
 print(f"⚠️  API Limits: 5 calls/minute, 100 calls/day (free tier)")
 print("="*60)

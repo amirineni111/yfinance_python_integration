@@ -112,7 +112,23 @@ for ticker, company_name in nse500_tickers:
         data["Ticker"] = ticker
         data["Company"] = company_name
 
+        inserted = 0
+        skipped = 0
         for _, row in data.iterrows():
+            trade_date = row['trading_date']
+            # Strip timezone if present (yfinance returns tz-aware dates)
+            if hasattr(trade_date, 'tz') and trade_date.tz is not None:
+                trade_date = trade_date.tz_localize(None)
+
+            # Check if record already exists for this ticker + date
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND trading_date = ?",
+                ticker, trade_date
+            )
+            if cursor.fetchone()[0] > 0:
+                skipped += 1
+                continue
+
             insert_query = f"""
             INSERT INTO {target_table} (
                 trading_date, open_price, high_price, low_price, close_price,
@@ -121,11 +137,15 @@ for ticker, company_name in nse500_tickers:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             cursor.execute(insert_query,
-                           row['trading_date'], row['Open'], row['High'], row['Low'], row['Close'],
+                           trade_date, row['Open'], row['High'], row['Low'], row['Close'],
                            row['Volume'], row['Dividends'], row['Stock Splits'], row['Ticker'], row['Company'])
+            inserted += 1
 
         conn.commit()
-        logger.info("Inserted data for %s (%d rows)", ticker, len(data))
+        if skipped > 0:
+            logger.info("Processed %s: %d inserted, %d skipped (already exist)", ticker, inserted, skipped)
+        else:
+            logger.info("Inserted data for %s (%d rows)", ticker, inserted)
         success_count += 1
 
     except Exception as e:

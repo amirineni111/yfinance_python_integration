@@ -72,17 +72,37 @@ for ticker, company_name in nasdaq100_tickers:
     data["Ticker"] = ticker
     data["Company"] = company_name
 
-    # ✅ Insert data into SQL Server
+    # ✅ Insert data into SQL Server (with duplicate check)
+    inserted = 0
+    skipped = 0
     for _, row in data.iterrows():
+        trade_date = row['trading_date']
+        # Strip timezone if present (yfinance returns tz-aware dates)
+        if hasattr(trade_date, 'tz') and trade_date.tz is not None:
+            trade_date = trade_date.tz_localize(None)
+
+        # Check if record already exists for this ticker + date
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND trading_date = ?",
+            ticker, trade_date
+        )
+        if cursor.fetchone()[0] > 0:
+            skipped += 1
+            continue
+
         insert_query = f"""
         INSERT INTO {target_table} (trading_date, open_price, high_price, low_price, close_price, volume, dividend, stocksplit, ticker, company)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        cursor.execute(insert_query, row['trading_date'], row['Open'], row['High'], row['Low'], row['Close'],
+        cursor.execute(insert_query, trade_date, row['Open'], row['High'], row['Low'], row['Close'],
                        row['Volume'], row['Dividends'], row['Stock Splits'], row['Ticker'], row['Company'])
+        inserted += 1
 
     conn.commit()
-    print(f"✅ Data for {ticker} inserted successfully.")
+    if skipped > 0:
+        print(f"⚠ {ticker}: {inserted} inserted, {skipped} skipped (already exist)")
+    else:
+        print(f"✅ Data for {ticker} inserted successfully ({inserted} rows).")
 
 # ✅ Close the connection
 cursor.close()

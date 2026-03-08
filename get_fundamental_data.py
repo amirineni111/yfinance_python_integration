@@ -4,10 +4,28 @@ import pandas as pd
 import pyodbc
 from datetime import datetime
 import time
+import argparse
+import smtplib
+import os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# ✅ Parse command-line arguments
+parser = argparse.ArgumentParser(description="Fetch fundamental data for NSE and/or NASDAQ stocks")
+parser.add_argument('--market', choices=['nse', 'nasdaq', 'all'], default='all',
+                    help='Which market to fetch: nse, nasdaq, or all (default: all)')
+args = parser.parse_args()
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
 database = "stockdata_db"
+
+# ✅ Email configuration (set STOCK_EMAIL_PASSWORD env var with Gmail App Password)
+EMAIL_SENDER = os.environ.get('STOCK_EMAIL_SENDER', 'sree.amiri@gmail.com')
+EMAIL_PASSWORD = os.environ.get('STOCK_EMAIL_PASSWORD', '')
+EMAIL_RECIPIENT = os.environ.get('STOCK_EMAIL_RECIPIENT', 'sree.amiri@gmail.com')
+SMTP_SERVER = os.environ.get('STOCK_SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('STOCK_SMTP_PORT', '587'))
 
 # ✅ Establish connection to SQL Server
 try:
@@ -125,6 +143,31 @@ def create_fundamental_tables():
     print("✅ Fundamental tables created successfully.")
 
 create_fundamental_tables()
+
+# ✅ Email notification function
+def send_failure_email(subject, body):
+    """Send email notification when failures occur."""
+    if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
+        print("⚠ Email not configured. Set STOCK_EMAIL_SENDER, STOCK_EMAIL_PASSWORD, STOCK_EMAIL_RECIPIENT env vars.")
+        print(f"📧 Would have sent email:")
+        print(f"   Subject: {subject}")
+        print(f"   Body: {body[:500]}")
+        return
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = EMAIL_RECIPIENT
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print(f"📧 Failure notification email sent to {EMAIL_RECIPIENT}")
+    except Exception as e:
+        print(f"❌ Failed to send email notification: {e}")
 
 # ✅ Function to fetch fundamental data
 def fetch_fundamentals(ticker):
@@ -247,33 +290,80 @@ def insert_fundamentals(ticker, company_name, fundamentals, target_table):
     
     conn.commit()
 
-# ✅ Process NSE 500 stocks
-print("\n📊 Fetching NSE 500 fundamental data...")
-cursor.execute("SELECT ticker, company_name FROM nse_500")
-nse_tickers = cursor.fetchall()
+# ✅ Process a market's tickers with failure tracking
+def process_market(market_label, master_table, target_table):
+    """Fetch and insert fundamentals for a market. Returns (success_count, failed_tickers)."""
+    print(f"\n📊 Fetching {market_label} fundamental data...")
+    cursor.execute(f"SELECT ticker, company_name FROM {master_table}")
+    tickers = cursor.fetchall()
 
-total_nse = len(nse_tickers)
-for idx, (ticker, company_name) in enumerate(nse_tickers, 1):
-    print(f"[{idx}/{total_nse}] Fetching fundamentals for {ticker}...")
-    fundamentals = fetch_fundamentals(ticker)
-    insert_fundamentals(ticker, company_name, fundamentals, 'nse_500_fundamentals')
-    print(f"✅ {ticker} fundamentals saved.")
-    time.sleep(1)  # Add 1 second delay to avoid rate limiting
+    total = len(tickers)
+    success_count = 0
+    failed_tickers = []
 
-# ✅ Process NASDAQ 100 stocks
-print("\n📊 Fetching NASDAQ 100 fundamental data...")
-cursor.execute("SELECT ticker, company_name FROM nasdaq_top100")
-nasdaq_tickers = cursor.fetchall()
+    for idx, (ticker, company_name) in enumerate(tickers, 1):
+        try:
+            print(f"[{idx}/{total}] Fetching fundamentals for {ticker}...")
+            fundamentals = fetch_fundamentals(ticker)
+            if fundamentals is None:
+                failed_tickers.append(ticker)
+                print(f"⚠ {ticker} — no data returned (API returned None)")
+            else:
+                insert_fundamentals(ticker, company_name, fundamentals, target_table)
+                success_count += 1
+                print(f"✅ {ticker} fundamentals saved.")
+        except Exception as e:
+            failed_tickers.append(ticker)
+            print(f"❌ {ticker} failed with error: {e}")
+        time.sleep(1)  # Delay to avoid rate limiting
 
-total_nasdaq = len(nasdaq_tickers)
-for idx, (ticker, company_name) in enumerate(nasdaq_tickers, 1):
-    print(f"[{idx}/{total_nasdaq}] Fetching fundamentals for {ticker}...")
-    fundamentals = fetch_fundamentals(ticker)
-    insert_fundamentals(ticker, company_name, fundamentals, 'nasdaq_100_fundamentals')
-    print(f"✅ {ticker} fundamentals saved.")
-    time.sleep(1)  # Add 1 second delay to avoid rate limiting
+    print(f"\n📊 {market_label} Summary: {success_count}/{total} succeeded, {len(failed_tickers)} failed")
+    if failed_tickers:
+        print(f"⚠ Failed tickers: {', '.join(failed_tickers[:50])}{'...' if len(failed_tickers) > 50 else ''}")
+
+    return success_count, failed_tickers, total
+
+# ✅ Run based on --market argument
+run_date = datetime.now().strftime('%Y-%m-%d %H:%M')
+all_failures = {}  # market_label -> (failed_tickers, total, success)
+
+if args.market in ('nse', 'all'):
+    try:
+        nse_success, nse_failed, nse_total = process_market('NSE 500', 'nse_500', 'nse_500_fundamentals')
+        if nse_failed:
+            all_failures['NSE 500'] = (nse_failed, nse_total, nse_success)
+    except Exception as e:
+        print(f"❌ NSE 500 processing crashed: {e}")
+        all_failures['NSE 500'] = ([f'ENTIRE BATCH CRASHED: {e}'], 0, 0)
+
+if args.market in ('nasdaq', 'all'):
+    try:
+        nasdaq_success, nasdaq_failed, nasdaq_total = process_market('NASDAQ', 'nasdaq_top100', 'nasdaq_100_fundamentals')
+        if nasdaq_failed:
+            all_failures['NASDAQ'] = (nasdaq_failed, nasdaq_total, nasdaq_success)
+    except Exception as e:
+        print(f"❌ NASDAQ processing crashed: {e}")
+        all_failures['NASDAQ'] = ([f'ENTIRE BATCH CRASHED: {e}'], 0, 0)
+
+# ✅ Send email if there were any failures
+if all_failures:
+    subject = f"⚠ Fundamental Data Fetch Failures — {run_date}"
+    body_lines = [f"Fundamental data fetch completed with failures on {run_date}\n"]
+    for market, (failed, total, success) in all_failures.items():
+        body_lines.append(f"\n{'='*50}")
+        body_lines.append(f"{market}: {success}/{total} succeeded, {len(failed)} failed")
+        body_lines.append(f"Failed tickers: {', '.join(failed)}")
+    body_lines.append(f"\n{'='*50}")
+    body_lines.append(f"\nMarkets processed: {args.market}")
+    body_lines.append(f"Script: get_fundamental_data.py")
+    send_failure_email(subject, '\n'.join(body_lines))
+else:
+    print("\n🎉 All markets processed with zero failures!")
 
 # ✅ Close connection
 cursor.close()
 conn.close()
-print("\n✅ All fundamental data fetched and stored successfully!")
+print(f"\n✅ Fundamental data fetch completed. Markets: {args.market}")
+if all_failures:
+    print(f"⚠ There were failures — check email or logs above for details.")
+    exit(1)  # Non-zero exit so batch file can detect failure

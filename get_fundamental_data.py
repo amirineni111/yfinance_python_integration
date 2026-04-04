@@ -176,14 +176,26 @@ def fetch_fundamentals(ticker):
         info = stock.info
         
         # Extract fundamental data
+        trailing_pe = info.get('trailingPE')
+        earnings_growth = info.get('earningsGrowth')
+        
+        # ✅ Calculate PEG ratio manually (yfinance pegRatio is unreliable/always 0)
+        # PEG = Trailing P/E ÷ Earnings Growth %
+        # earningsGrowth from yfinance is decimal (0.25 = 25%), so multiply by 100
+        calculated_peg = None
+        if trailing_pe and earnings_growth and earnings_growth != 0:
+            growth_pct = earnings_growth * 100
+            if growth_pct > 0:  # PEG only meaningful with positive growth
+                calculated_peg = round(trailing_pe / growth_pct, 4)
+        
         fundamentals = {
             'market_cap': info.get('marketCap'),
             'enterprise_value': info.get('enterpriseValue'),
-            'trailing_pe': info.get('trailingPE'),
+            'trailing_pe': trailing_pe,
             'forward_pe': info.get('forwardPE'),
             'price_to_book': info.get('priceToBook'),
             'price_to_sales': info.get('priceToSalesTrailing12Months'),
-            'peg_ratio': info.get('pegRatio'),
+            'peg_ratio': calculated_peg,
             'trailing_eps': info.get('trailingEps'),
             'forward_eps': info.get('forwardEps'),
             'book_value': info.get('bookValue'),

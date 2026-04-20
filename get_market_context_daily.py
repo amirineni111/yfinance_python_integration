@@ -19,6 +19,8 @@ import pandas as pd
 import numpy as np
 import pyodbc
 import argparse
+import logging
+import os
 from datetime import datetime, timedelta
 
 # ============================================================
@@ -28,6 +30,22 @@ from datetime import datetime, timedelta
 server = "localhost\\MSSQLSERVER01"
 database = "stockdata_db"
 target_table = "market_context_daily"
+
+# Setup logging
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+log_file = os.path.join(log_dir, "market_context_daily.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()  # Also output to console
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Tickers to download (grouped by category)
 GLOBAL_TICKERS = {
@@ -136,10 +154,10 @@ def connect_db():
             f"DATABASE={database};"
             f"Trusted_Connection=yes;"
         )
-        print("✅ Connected to SQL Server.")
+        logger.info("Connected to SQL Server")
         return conn
     except Exception as e:
-        print(f"❌ Failed to connect to SQL Server: {e}")
+        logger.error(f"Failed to connect to SQL Server: {e}")
         exit(1)
 
 
@@ -148,7 +166,7 @@ def ensure_table(conn):
     cursor = conn.cursor()
     cursor.execute(CREATE_TABLE_SQL)
     conn.commit()
-    print(f"✅ Table '{target_table}' ready.")
+    logger.info(f"Table '{target_table}' ready")
 
 
 def get_last_date(conn):
@@ -164,8 +182,8 @@ def download_data(start_date, end_date):
     all_yf_tickers = list(ALL_TICKERS.keys())
     ticker_str = ' '.join(all_yf_tickers)
 
-    print(f"\n📊 Downloading {len(all_yf_tickers)} tickers from {start_date} to {end_date}...")
-    print(f"   Tickers: {ticker_str}")
+    logger.info(f"Downloading {len(all_yf_tickers)} tickers from {start_date} to {end_date}")
+    logger.info(f"Tickers: {ticker_str}")
 
     try:
         raw = yf.download(
@@ -178,11 +196,11 @@ def download_data(start_date, end_date):
             threads=True,
         )
     except Exception as e:
-        print(f"❌ yfinance download failed: {e}")
+        logger.error(f"yfinance download failed: {e}")
         return pd.DataFrame()
 
     if raw.empty:
-        print("⚠️  No data returned from yfinance.")
+        logger.warning("No data returned from yfinance")
         return pd.DataFrame()
 
     # Build a clean DataFrame with one row per trading date
@@ -196,7 +214,7 @@ def download_data(start_date, end_date):
                 if yf_ticker in raw.columns.get_level_values(0):
                     ticker_data = raw[yf_ticker]
                 else:
-                    print(f"  ⚠️  {yf_ticker} ({col_prefix}): not in download results, skipping.")
+                    logger.warning(f"{yf_ticker} ({col_prefix}): not in download results, skipping")
                     continue
             else:
                 # Single ticker case (shouldn't happen with batch, but handle it)
@@ -204,7 +222,7 @@ def download_data(start_date, end_date):
 
             close_col = 'Close'
             if close_col not in ticker_data.columns:
-                print(f"  ⚠️  {yf_ticker} ({col_prefix}): no 'Close' column, skipping.")
+                logger.warning(f"{yf_ticker} ({col_prefix}): no 'Close' column, skipping")
                 continue
 
             close = ticker_data[close_col].astype(float)
@@ -233,14 +251,14 @@ def download_data(start_date, end_date):
     data_cols = [c for c in result.columns if c != 'trading_date']
     result = result.dropna(how='all', subset=data_cols if data_cols else None)
 
-    print(f"✅ Downloaded {len(result)} trading days of market context data.")
+    logger.info(f"Downloaded {len(result)} trading days of market context data")
     return result
 
 
 def insert_data(conn, df):
     """Insert rows into market_context_daily, skipping existing dates."""
     if df.empty:
-        print("⚠️  No data to insert.")
+        logger.warning("No data to insert")
         return
 
     cursor = conn.cursor()
@@ -299,10 +317,10 @@ def insert_data(conn, df):
             cursor.execute(insert_sql, values)
             inserted += 1
         except Exception as e:
-            print(f"  ⚠️  Error inserting {trading_date}: {e}")
+            logger.error(f"Error inserting {trading_date}: {e}")
 
     conn.commit()
-    print(f"✅ Inserted {inserted} rows, skipped {skipped} existing dates.")
+    logger.info(f"Inserted {inserted} rows, skipped {skipped} existing dates")
 
 
 # ============================================================
@@ -315,30 +333,31 @@ def main():
                         help=f'Backfill {BACKFILL_DAYS} days of historical data')
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("Market Context Daily ETL")
-    print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Market Context Daily ETL")
+    logger.info(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
 
     conn = connect_db()
     ensure_table(conn)
 
     if args.backfill:
         start_date = datetime.today() - timedelta(days=BACKFILL_DAYS)
-        print(f"\n🔄 Backfill mode: loading {BACKFILL_DAYS} days from {start_date.date()}")
+        logger.info(f"Backfill mode: loading {BACKFILL_DAYS} days from {start_date.date()}")
     else:
         last_date = get_last_date(conn)
         if last_date:
-            start_date = last_date + timedelta(days=1)
-            print(f"\n📅 Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()}")
+            # Convert date to datetime for consistency
+            start_date = datetime.combine(last_date, datetime.min.time()) + timedelta(days=1)
+            logger.info(f"Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()}")
         else:
             start_date = datetime.today() - timedelta(days=BACKFILL_DAYS)
-            print(f"\n📅 First run: no data found, backfilling {BACKFILL_DAYS} days")
+            logger.info(f"First run: no data found, backfilling {BACKFILL_DAYS} days")
 
     end_date = datetime.today() + timedelta(days=1)
 
     if start_date.date() >= end_date.date():
-        print("✅ Data is already up to date. Nothing to fetch.")
+        logger.info("Data is already up to date. Nothing to fetch")
         conn.close()
         return
 
@@ -349,11 +368,11 @@ def main():
     cursor = conn.cursor()
     cursor.execute(f"SELECT COUNT(*), MIN(trading_date), MAX(trading_date) FROM {target_table}")
     count, min_date, max_date = cursor.fetchone()
-    print(f"\n📊 Table summary: {count} rows, {min_date} to {max_date}")
+    logger.info(f"Table summary: {count} rows, {min_date} to {max_date}")
 
     cursor.close()
     conn.close()
-    print("✅ Market context ETL complete!")
+    logger.info("Market context ETL complete!")
 
 
 if __name__ == '__main__':

@@ -348,8 +348,10 @@ def main():
         last_date = get_last_date(conn)
         if last_date:
             # Convert date to datetime for consistency
-            start_date = datetime.combine(last_date, datetime.min.time()) + timedelta(days=1)
-            logger.info(f"Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()}")
+            # IMPORTANT: Fetch at least 3 days to ensure pct_change() has data
+            # Go back 2 days from last_date to guarantee we get yesterday + today
+            start_date = datetime.combine(last_date, datetime.min.time()) - timedelta(days=2)
+            logger.info(f"Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()} (includes overlap for pct_change calculation)")
         else:
             start_date = datetime.today() - timedelta(days=BACKFILL_DAYS)
             logger.info(f"First run: no data found, backfilling {BACKFILL_DAYS} days")

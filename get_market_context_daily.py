@@ -230,7 +230,7 @@ def download_data(start_date, end_date):
             # For volatility indices and yield: store close + daily change
             if col_prefix in ('vix', 'india_vix'):
                 result[f'{col_prefix}_close'] = close
-                result[f'{col_prefix}_change_pct'] = close.pct_change() * 100
+                result[f'{col_prefix}_change_pct'] = close.pct_change(fill_method=None) * 100
 
             elif col_prefix == 'us_10y_yield':
                 result[f'{col_prefix}_close'] = close
@@ -238,11 +238,11 @@ def download_data(start_date, end_date):
 
             elif col_prefix in ('sp500', 'nasdaq_comp', 'nifty50', 'dxy'):
                 result[f'{col_prefix}_close'] = close
-                result[f'{col_prefix}_return_1d'] = close.pct_change() * 100
+                result[f'{col_prefix}_return_1d'] = close.pct_change(fill_method=None) * 100
 
             else:
                 # Sector ETFs and India sector indices — just 1-day return
-                result[f'{col_prefix}_return_1d'] = close.pct_change() * 100
+                result[f'{col_prefix}_return_1d'] = close.pct_change(fill_method=None) * 100
 
         except Exception as e:
             print(f"  ⚠️  {yf_ticker} ({col_prefix}): Error processing — {e}")
@@ -256,14 +256,14 @@ def download_data(start_date, end_date):
 
 
 def insert_data(conn, df):
-    """Insert rows into market_context_daily, skipping existing dates."""
+    """Insert new rows and update existing rows with NULL columns."""
     if df.empty:
         logger.warning("No data to insert")
         return
 
     cursor = conn.cursor()
 
-    # Get existing dates to avoid duplicates
+    # Get existing dates and their NULL columns
     cursor.execute(f"SELECT trading_date FROM {target_table}")
     existing_dates = set(row[0] for row in cursor.fetchall())
 
@@ -296,31 +296,57 @@ def insert_data(conn, df):
     insert_sql = f"INSERT INTO {target_table} ({col_names}) VALUES ({placeholders})"
 
     inserted = 0
+    updated = 0
     skipped = 0
 
     for idx, row in df.iterrows():
         trading_date = idx.date() if hasattr(idx, 'date') else idx
 
         if trading_date in existing_dates:
-            skipped += 1
-            continue
-
-        values = [trading_date]
-        for col in db_columns[1:]:  # Skip trading_date
-            val = row.get(col, None)
-            if val is not None and pd.notna(val):
-                values.append(float(val))
+            # Row exists - check if we should update NULL columns
+            # Build UPDATE statement for non-NULL values we have
+            updates = []
+            values = []
+            
+            for col in db_columns[1:]:  # Skip trading_date
+                val = row.get(col, None)
+                if val is not None and pd.notna(val):
+                    updates.append(f"{col} = ?")
+                    values.append(float(val))
+            
+            if updates:
+                # Update existing row with new non-NULL values
+                update_sql = f"UPDATE {target_table} SET {', '.join(updates)} WHERE trading_date = ?"
+                values.append(trading_date)
+                try:
+                    cursor.execute(update_sql, values)
+                    if cursor.rowcount > 0:
+                        updated += 1
+                        logger.info(f"  Updated {trading_date} with {len(updates)} columns")
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    logger.error(f"Error updating {trading_date}: {e}")
             else:
-                values.append(None)
+                skipped += 1
+        else:
+            # New row - insert it
+            values = [trading_date]
+            for col in db_columns[1:]:  # Skip trading_date
+                val = row.get(col, None)
+                if val is not None and pd.notna(val):
+                    values.append(float(val))
+                else:
+                    values.append(None)
 
-        try:
-            cursor.execute(insert_sql, values)
-            inserted += 1
-        except Exception as e:
-            logger.error(f"Error inserting {trading_date}: {e}")
+            try:
+                cursor.execute(insert_sql, values)
+                inserted += 1
+            except Exception as e:
+                logger.error(f"Error inserting {trading_date}: {e}")
 
     conn.commit()
-    logger.info(f"Inserted {inserted} rows, skipped {skipped} existing dates")
+    logger.info(f"Inserted {inserted} new rows, updated {updated} existing rows, skipped {skipped} unchanged")
 
 
 # ============================================================
@@ -348,10 +374,10 @@ def main():
         last_date = get_last_date(conn)
         if last_date:
             # Convert date to datetime for consistency
-            # IMPORTANT: Fetch at least 3 days to ensure pct_change() has data
-            # Go back 2 days from last_date to guarantee we get yesterday + today
-            start_date = datetime.combine(last_date, datetime.min.time()) - timedelta(days=2)
-            logger.info(f"Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()} (includes overlap for pct_change calculation)")
+            # IMPORTANT: Go back 7 days to ensure we have enough previous data for pct_change()
+            # This accounts for weekends, holidays, and data gaps
+            start_date = datetime.combine(last_date, datetime.min.time()) - timedelta(days=7)
+            logger.info(f"Incremental mode: last date in DB = {last_date}, fetching from {start_date.date()} (7-day lookback for pct_change)")
         else:
             start_date = datetime.today() - timedelta(days=BACKFILL_DAYS)
             logger.info(f"First run: no data found, backfilling {BACKFILL_DAYS} days")

@@ -237,13 +237,30 @@ BATCH_SIZE = 100
 def clean_fundamentals(fundamentals):
     """
     Clean fundamental data dictionary to ensure proper NULL handling.
-    Converts None, empty strings, inf, and -inf to None (SQL NULL).
+    Converts None, empty strings, non-numeric strings, inf, and -inf to None (SQL NULL).
     """
     import math
     cleaned = {}
     for key, value in fundamentals.items():
+        # Handle None, empty string, and string 'None'
         if value is None or value == '' or value == 'None':
             cleaned[key] = None
+        # Handle string values that should be numeric
+        elif isinstance(value, str):
+            # Common non-numeric string values from yfinance
+            if value.lower() in ('n/a', 'na', '-', 'nan', 'inf', '-inf', 'null', 'none'):
+                cleaned[key] = None
+            else:
+                # Try to convert to float, if it fails, set to None
+                try:
+                    numeric_value = float(value)
+                    if math.isinf(numeric_value) or math.isnan(numeric_value):
+                        cleaned[key] = None
+                    else:
+                        cleaned[key] = numeric_value
+                except (ValueError, TypeError):
+                    cleaned[key] = None
+        # Handle float inf/nan
         elif isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
             cleaned[key] = None
         else:
@@ -259,71 +276,76 @@ def insert_fundamentals_batch(batch, target_table):
     fetch_date = datetime.now().date()
     
     for ticker, company_name, fundamentals in batch:
-        # Clean fundamentals data to handle None/NaN/Inf values properly
-        fundamentals = clean_fundamentals(fundamentals)
-        
-        # Check if record exists for today
-        check_query = f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND fetch_date = ?"
-        cursor.execute(check_query, ticker, fetch_date)
-        exists = cursor.fetchone()[0] > 0
-        
-        if exists:
-            # Update existing record
-            update_query = f"""
-            UPDATE {target_table} SET
-                company_name = ?, market_cap = ?, enterprise_value = ?, trailing_pe = ?, forward_pe = ?,
-                price_to_book = ?, price_to_sales = ?, peg_ratio = ?, trailing_eps = ?, forward_eps = ?,
-                book_value = ?, profit_margin = ?, operating_margin = ?, gross_margin = ?,
-                return_on_equity = ?, return_on_assets = ?, total_revenue = ?, revenue_per_share = ?,
-                revenue_growth = ?, earnings_growth = ?, dividend_rate = ?, dividend_yield = ?,
-                payout_ratio = ?, total_cash = ?, total_debt = ?, debt_to_equity = ?,
-                current_ratio = ?, quick_ratio = ?, free_cashflow = ?, operating_cashflow = ?,
-                beta = ?, fifty_two_week_high = ?, fifty_two_week_low = ?, fifty_day_avg = ?,
-                two_hundred_day_avg = ?
-            WHERE ticker = ? AND fetch_date = ?
-            """
-            cursor.execute(update_query, 
-                company_name, fundamentals['market_cap'], fundamentals['enterprise_value'],
-                fundamentals['trailing_pe'], fundamentals['forward_pe'], fundamentals['price_to_book'],
-                fundamentals['price_to_sales'], fundamentals['peg_ratio'], fundamentals['trailing_eps'],
-                fundamentals['forward_eps'], fundamentals['book_value'], fundamentals['profit_margin'],
-                fundamentals['operating_margin'], fundamentals['gross_margin'], fundamentals['return_on_equity'],
-                fundamentals['return_on_assets'], fundamentals['total_revenue'], fundamentals['revenue_per_share'],
-                fundamentals['revenue_growth'], fundamentals['earnings_growth'], fundamentals['dividend_rate'],
-                fundamentals['dividend_yield'], fundamentals['payout_ratio'], fundamentals['total_cash'],
-                fundamentals['total_debt'], fundamentals['debt_to_equity'], fundamentals['current_ratio'],
-                fundamentals['quick_ratio'], fundamentals['free_cashflow'], fundamentals['operating_cashflow'],
-                fundamentals['beta'], fundamentals['fifty_two_week_high'], fundamentals['fifty_two_week_low'],
-                fundamentals['fifty_day_avg'], fundamentals['two_hundred_day_avg'],
-                ticker, fetch_date
-            )
-        else:
-            # Insert new record
-            insert_query = f"""
-            INSERT INTO {target_table} (
-                ticker, company_name, fetch_date, market_cap, enterprise_value, trailing_pe, forward_pe,
-                price_to_book, price_to_sales, peg_ratio, trailing_eps, forward_eps, book_value,
-                profit_margin, operating_margin, gross_margin, return_on_equity, return_on_assets,
-                total_revenue, revenue_per_share, revenue_growth, earnings_growth, dividend_rate,
-                dividend_yield, payout_ratio, total_cash, total_debt, debt_to_equity, current_ratio,
-                quick_ratio, free_cashflow, operating_cashflow, beta, fifty_two_week_high,
-                fifty_two_week_low, fifty_day_avg, two_hundred_day_avg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            cursor.execute(insert_query,
-                ticker, company_name, fetch_date, fundamentals['market_cap'], fundamentals['enterprise_value'],
-                fundamentals['trailing_pe'], fundamentals['forward_pe'], fundamentals['price_to_book'],
-                fundamentals['price_to_sales'], fundamentals['peg_ratio'], fundamentals['trailing_eps'],
-                fundamentals['forward_eps'], fundamentals['book_value'], fundamentals['profit_margin'],
-                fundamentals['operating_margin'], fundamentals['gross_margin'], fundamentals['return_on_equity'],
-                fundamentals['return_on_assets'], fundamentals['total_revenue'], fundamentals['revenue_per_share'],
-                fundamentals['revenue_growth'], fundamentals['earnings_growth'], fundamentals['dividend_rate'],
-                fundamentals['dividend_yield'], fundamentals['payout_ratio'], fundamentals['total_cash'],
-                fundamentals['total_debt'], fundamentals['debt_to_equity'], fundamentals['current_ratio'],
-                fundamentals['quick_ratio'], fundamentals['free_cashflow'], fundamentals['operating_cashflow'],
-                fundamentals['beta'], fundamentals['fifty_two_week_high'], fundamentals['fifty_two_week_low'],
-                fundamentals['fifty_day_avg'], fundamentals['two_hundred_day_avg']
-            )
+        try:
+            # Clean fundamentals data to handle None/NaN/Inf values properly
+            fundamentals = clean_fundamentals(fundamentals)
+            
+            # Check if record exists for today
+            check_query = f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND fetch_date = ?"
+            cursor.execute(check_query, ticker, fetch_date)
+            exists = cursor.fetchone()[0] > 0
+            
+            if exists:
+                # Update existing record
+                update_query = f"""
+                UPDATE {target_table} SET
+                    company_name = ?, market_cap = ?, enterprise_value = ?, trailing_pe = ?, forward_pe = ?,
+                    price_to_book = ?, price_to_sales = ?, peg_ratio = ?, trailing_eps = ?, forward_eps = ?,
+                    book_value = ?, profit_margin = ?, operating_margin = ?, gross_margin = ?,
+                    return_on_equity = ?, return_on_assets = ?, total_revenue = ?, revenue_per_share = ?,
+                    revenue_growth = ?, earnings_growth = ?, dividend_rate = ?, dividend_yield = ?,
+                    payout_ratio = ?, total_cash = ?, total_debt = ?, debt_to_equity = ?,
+                    current_ratio = ?, quick_ratio = ?, free_cashflow = ?, operating_cashflow = ?,
+                    beta = ?, fifty_two_week_high = ?, fifty_two_week_low = ?, fifty_day_avg = ?,
+                    two_hundred_day_avg = ?
+                WHERE ticker = ? AND fetch_date = ?
+                """
+                cursor.execute(update_query, 
+                    company_name, fundamentals['market_cap'], fundamentals['enterprise_value'],
+                    fundamentals['trailing_pe'], fundamentals['forward_pe'], fundamentals['price_to_book'],
+                    fundamentals['price_to_sales'], fundamentals['peg_ratio'], fundamentals['trailing_eps'],
+                    fundamentals['forward_eps'], fundamentals['book_value'], fundamentals['profit_margin'],
+                    fundamentals['operating_margin'], fundamentals['gross_margin'], fundamentals['return_on_equity'],
+                    fundamentals['return_on_assets'], fundamentals['total_revenue'], fundamentals['revenue_per_share'],
+                    fundamentals['revenue_growth'], fundamentals['earnings_growth'], fundamentals['dividend_rate'],
+                    fundamentals['dividend_yield'], fundamentals['payout_ratio'], fundamentals['total_cash'],
+                    fundamentals['total_debt'], fundamentals['debt_to_equity'], fundamentals['current_ratio'],
+                    fundamentals['quick_ratio'], fundamentals['free_cashflow'], fundamentals['operating_cashflow'],
+                    fundamentals['beta'], fundamentals['fifty_two_week_high'], fundamentals['fifty_two_week_low'],
+                    fundamentals['fifty_day_avg'], fundamentals['two_hundred_day_avg'],
+                    ticker, fetch_date
+                )
+            else:
+                # Insert new record
+                insert_query = f"""
+                INSERT INTO {target_table} (
+                    ticker, company_name, fetch_date, market_cap, enterprise_value, trailing_pe, forward_pe,
+                    price_to_book, price_to_sales, peg_ratio, trailing_eps, forward_eps, book_value,
+                    profit_margin, operating_margin, gross_margin, return_on_equity, return_on_assets,
+                    total_revenue, revenue_per_share, revenue_growth, earnings_growth, dividend_rate,
+                    dividend_yield, payout_ratio, total_cash, total_debt, debt_to_equity, current_ratio,
+                    quick_ratio, free_cashflow, operating_cashflow, beta, fifty_two_week_high,
+                    fifty_two_week_low, fifty_day_avg, two_hundred_day_avg
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                cursor.execute(insert_query,
+                    ticker, company_name, fetch_date, fundamentals['market_cap'], fundamentals['enterprise_value'],
+                    fundamentals['trailing_pe'], fundamentals['forward_pe'], fundamentals['price_to_book'],
+                    fundamentals['price_to_sales'], fundamentals['peg_ratio'], fundamentals['trailing_eps'],
+                    fundamentals['forward_eps'], fundamentals['book_value'], fundamentals['profit_margin'],
+                    fundamentals['operating_margin'], fundamentals['gross_margin'], fundamentals['return_on_equity'],
+                    fundamentals['return_on_assets'], fundamentals['total_revenue'], fundamentals['revenue_per_share'],
+                    fundamentals['revenue_growth'], fundamentals['earnings_growth'], fundamentals['dividend_rate'],
+                    fundamentals['dividend_yield'], fundamentals['payout_ratio'], fundamentals['total_cash'],
+                    fundamentals['total_debt'], fundamentals['debt_to_equity'], fundamentals['current_ratio'],
+                    fundamentals['quick_ratio'], fundamentals['free_cashflow'], fundamentals['operating_cashflow'],
+                    fundamentals['beta'], fundamentals['fifty_two_week_high'], fundamentals['fifty_two_week_low'],
+                    fundamentals['fifty_day_avg'], fundamentals['two_hundred_day_avg']
+                )
+        except Exception as e:
+            print(f"   ⚠️ Error inserting {ticker}: {e}")
+            print(f"   Fundamentals data: {fundamentals}")
+            raise  # Re-raise to stop batch processing and identify the problematic ticker
     
     conn.commit()
     print(f"   💾 Batch committed: {len(batch)} tickers written to {target_table}")

@@ -233,6 +233,23 @@ def fetch_fundamentals(ticker):
 # ✅ Batch size for DB inserts (accumulate N tickers before committing)
 BATCH_SIZE = 100
 
+# ✅ Function to clean fundamental data before SQL insert
+def clean_fundamentals(fundamentals):
+    """
+    Clean fundamental data dictionary to ensure proper NULL handling.
+    Converts None, empty strings, inf, and -inf to None (SQL NULL).
+    """
+    import math
+    cleaned = {}
+    for key, value in fundamentals.items():
+        if value is None or value == '' or value == 'None':
+            cleaned[key] = None
+        elif isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
+            cleaned[key] = None
+        else:
+            cleaned[key] = value
+    return cleaned
+
 # ✅ Function to insert a batch of fundamental data (single commit per batch)
 def insert_fundamentals_batch(batch, target_table):
     """Insert/update a batch of (ticker, company_name, fundamentals) tuples with a single commit."""
@@ -242,6 +259,9 @@ def insert_fundamentals_batch(batch, target_table):
     fetch_date = datetime.now().date()
     
     for ticker, company_name, fundamentals in batch:
+        # Clean fundamentals data to handle None/NaN/Inf values properly
+        fundamentals = clean_fundamentals(fundamentals)
+        
         # Check if record exists for today
         check_query = f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND fetch_date = ?"
         cursor.execute(check_query, ticker, fetch_date)

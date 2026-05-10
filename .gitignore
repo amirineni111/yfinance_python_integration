@@ -48,6 +48,9 @@ desktop.ini
 *.log
 logs/
 
+# Environment variables (contains secrets — never commit)
+.env
+
 # Environment variables
 .env
 .env.local

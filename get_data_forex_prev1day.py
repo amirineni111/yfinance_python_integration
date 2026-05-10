@@ -1,11 +1,15 @@
 # This py script runs daily using Windows Task Scheduler to get previous day data for Forex pairs
 # Reads forex symbols from dbo.forex_master table and inserts into dbo.forex_hist_data
-# Uses Alpha Vantage API for accurate forex data
+# Uses Polygon.io API for accurate forex data
+import os
 import pandas as pd
 import pyodbc
 import requests
 from datetime import datetime, timedelta
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
@@ -13,9 +17,12 @@ database = "stockdata_db"
 source_table = "forex_master"
 target_table = "forex_hist_data"
 
-# Alpha Vantage API Configuration
-ALPHA_VANTAGE_KEY = "AG63AW94QZN86YBX"  # Your API key
-API_WAIT_TIME = 15  # Seconds to wait between API calls (free tier: 5 calls/minute)
+# Polygon.io API Configuration (replaces Alpha Vantage)
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+if not POLYGON_API_KEY:
+    print("❌ POLYGON_API_KEY not found in .env file. Exiting.")
+    exit()
+API_WAIT_TIME = 12   # 5 calls/min limit on Polygon — 12s gap keeps safely under
 
 # Connect to SQL Server
 try:
@@ -46,16 +53,16 @@ try:
         exit()
     
     print(f"📊 Found {len(forex_symbols)} active forex pairs to process.")
-    print("🔑 Using Alpha Vantage API for data retrieval...")
+    print("🔑 Using Polygon.io API for data retrieval...")
 except Exception as e:
     print("❌ Failed to fetch forex symbols:", e)
     exit()
 
-# Function to fetch forex data from Alpha Vantage
+# Function to fetch forex data from Polygon.io
 def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
     """
-    Fetch latest forex data from Alpha Vantage API for a specific date
-    
+    Fetch forex data from Polygon.io for a specific date
+
     Parameters:
     -----------
     from_currency : str
@@ -63,84 +70,61 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
     to_currency : str
         Quote currency (e.g., 'USD')
     api_key : str
-        Alpha Vantage API key
+        Polygon.io API key
     target_date : date
         Target trading date
-    
+
     Returns:
     --------
     dict or None: Trading data for the target date
     """
-    
-    url = 'https://www.alphavantage.co/query'
+    symbol = f"C:{from_currency}{to_currency}"
+    date_str = target_date.strftime('%Y-%m-%d')
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{date_str}/{date_str}"
     params = {
-        'function': 'FX_DAILY',
-        'from_symbol': from_currency,
-        'to_symbol': to_currency,
-        'apikey': api_key,
-        'outputsize': 'compact',  # Get last 100 days
-        'datatype': 'json'
+        'apiKey': api_key,
+        'adjusted': 'true'
     }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        data = response.json()
-        
-        # Check for errors
-        if 'Error Message' in data:
-            print(f"  ❌ API Error: {data['Error Message']}")
-            return None
-        
-        if 'Note' in data:
-            print(f"  ⚠️  API Limit: {data['Note']}")
-            return None
-        
-        if 'Time Series FX (Daily)' not in data:
-            print(f"  ❌ No data returned from Alpha Vantage")
-            return None
-        
-        # Get time series data
-        time_series = data['Time Series FX (Daily)']
-        
-        # Look for the target date
-        target_date_str = target_date.strftime('%Y-%m-%d')
-        
-        if target_date_str in time_series:
-            values = time_series[target_date_str]
+
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params=params, timeout=30)
+
+            if response.status_code == 429:
+                wait = 60 * (attempt + 1)
+                print(f"  ⚠️  Rate limited (429). Waiting {wait}s before retry {attempt + 1}/3...")
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('status') == 'ERROR':
+                print(f"  ❌ Polygon API Error: {data.get('error')}")
+                return None
+
+            if data.get('resultsCount', 0) == 0:
+                print(f"  ⚠️  No data returned from Polygon for {date_str}")
+                return None
+
+            result = data['results'][0]
             return {
                 'trading_date': target_date,
-                'open_price': float(values['1. open']),
-                'high_price': float(values['2. high']),
-                'low_price': float(values['3. low']),
-                'close_price': float(values['4. close']),
-                'volume': 0
+                'open_price': float(result['o']),
+                'high_price': float(result['h']),
+                'low_price': float(result['l']),
+                'close_price': float(result['c']),
+                'volume': int(result.get('v', 0))
             }
-        else:
-            # If exact date not found, try to find the most recent date before target
-            available_dates = sorted(time_series.keys(), reverse=True)
-            for date_str in available_dates:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                if date_obj <= target_date:
-                    values = time_series[date_str]
-                    print(f"  ℹ️  Using closest available date: {date_str}")
-                    return {
-                        'trading_date': date_obj,
-                        'open_price': float(values['1. open']),
-                        'high_price': float(values['2. high']),
-                        'low_price': float(values['3. low']),
-                        'close_price': float(values['4. close']),
-                        'volume': 0
-                    }
-            
-            print(f"  ⚠️  No data found for {target_date_str} or earlier dates")
+
+        except requests.exceptions.Timeout:
+            print(f"  ❌ Request timeout (attempt {attempt + 1}/3)")
+        except Exception as e:
+            print(f"  ❌ Error fetching data: {e}")
             return None
-            
-    except requests.exceptions.Timeout:
-        print(f"  ❌ Request timeout")
-        return None
-    except Exception as e:
-        print(f"  ❌ Error fetching data: {e}")
-        return None
+
+    print(f"  ❌ All retries exhausted for {from_currency}/{to_currency}")
+    return None
 
 # Calculate target trading day: try today first, fallback to previous trading day
 today = datetime.now()
@@ -177,19 +161,19 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
     try:
         print(f"\n[{idx}/{len(forex_symbols)}] 🔄 Processing {symbol} ({currency_from}/{currency_to})...")
         
-        # Fetch data from Alpha Vantage — try today first, fallback to previous day
-        forex_data = fetch_forex_latest(currency_from, currency_to, ALPHA_VANTAGE_KEY, target_day.date())
-        
+        # Fetch data from Polygon.io — try today first, fallback to previous day
+        forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, target_day.date())
+
         if not forex_data and target_day.date() != fallback_day.date():
             print(f"  ℹ️  Today's data not available yet, trying fallback date {fallback_day_str}...")
-            forex_data = fetch_forex_latest(currency_from, currency_to, ALPHA_VANTAGE_KEY, fallback_day.date())
+            forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, fallback_day.date())
         
         if not forex_data:
             print(f"  ⚠️  No data found for {symbol}. Skipping...")
             error_count += 1
             continue
         
-        # Extract data from Alpha Vantage response
+        # Extract data from Polygon.io response
         trading_date = forex_data['trading_date']
         open_price = forex_data['open_price']
         high_price = forex_data['high_price']
@@ -258,9 +242,9 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
         conn.commit()
         success_count += 1
         
-        # Rate limiting - Alpha Vantage free tier allows 5 calls/minute
+        # Rate limiting - minimal wait for Polygon.io paid tier
         if idx < len(forex_symbols):
-            print(f"  ⏳ Waiting {API_WAIT_TIME} seconds (API rate limit)...")
+            print(f"  ⏳ Waiting {API_WAIT_TIME} second (rate limit)...")
             time.sleep(API_WAIT_TIME)
             
     except Exception as e:
@@ -275,10 +259,9 @@ conn.close()
 
 # Summary
 print("\n" + "="*60)
-print("📊 FOREX DATA UPDATE SUMMARY (Alpha Vantage API)")
+print("📊 FOREX DATA UPDATE SUMMARY (Polygon.io API)")
 print("="*60)
 print(f"✅ Successfully processed: {success_count} records")
 print(f"❌ Errors: {error_count} records")
 print(f"📅 Target date: {target_day_str} | Fallback: {fallback_day_str}")
-print(f"⚠️  API Limits: 5 calls/minute, 100 calls/day (free tier)")
 print("="*60)

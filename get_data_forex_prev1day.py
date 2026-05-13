@@ -2,6 +2,7 @@
 # Reads forex symbols from dbo.forex_master table and inserts into dbo.forex_hist_data
 # Uses Polygon.io API for accurate forex data
 import os
+import logging
 import pandas as pd
 import pyodbc
 import requests
@@ -9,7 +10,37 @@ from datetime import datetime, timedelta
 import time
 from dotenv import load_dotenv
 
-load_dotenv()
+import sys
+
+# Fix Windows console encoding (charmap) — must be done before any logging
+# Without this, Polygon.io error messages containing non-ASCII chars (e.g. ¥ for JPY)
+# crash the StreamHandler and surface as a misleading 'charmap' error instead of the real one
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# Load .env from the script's own directory (not CWD — important for Task Scheduler)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(SCRIPT_DIR, '.env'))
+
+# ── File Logging ──────────────────────────────────────────────────────────────
+log_dir = os.path.join(SCRIPT_DIR, 'logs')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'get_data_forex_prev1day.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("get_data_forex_prev1day.py started")
+logger.info(f"Script dir: {SCRIPT_DIR} | CWD: {os.getcwd()}")
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
@@ -20,8 +51,8 @@ target_table = "forex_hist_data"
 # Polygon.io API Configuration (replaces Alpha Vantage)
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 if not POLYGON_API_KEY:
-    print("❌ POLYGON_API_KEY not found in .env file. Exiting.")
-    exit()
+    logger.error("POLYGON_API_KEY not found in .env file. Exiting.")
+    exit(1)
 API_WAIT_TIME = 12   # 5 calls/min limit on Polygon — 12s gap keeps safely under
 
 # Connect to SQL Server
@@ -33,10 +64,10 @@ try:
         f"Trusted_Connection=yes;"
     )
     cursor = conn.cursor()
-    print("✅ Connected to SQL Server successfully.")
+    logger.info("Connected to SQL Server successfully.")
 except Exception as e:
-    print("❌ Connection failed:", e)
-    exit()
+    logger.error(f"Connection failed: {e}")
+    exit(1)
 
 # Fetch active forex symbols from master table
 try:
@@ -49,14 +80,14 @@ try:
     forex_symbols = cursor.fetchall()
     
     if not forex_symbols:
-        print("❌ No active forex symbols found in master table.")
-        exit()
+        logger.error("No active forex symbols found in master table. Exiting.")
+        exit(1)
     
-    print(f"📊 Found {len(forex_symbols)} active forex pairs to process.")
-    print("🔑 Using Polygon.io API for data retrieval...")
+    logger.info(f"Found {len(forex_symbols)} active forex pairs to process.")
+    logger.info("Using Polygon.io API for data retrieval.")
 except Exception as e:
-    print("❌ Failed to fetch forex symbols:", e)
-    exit()
+    logger.error(f"Failed to fetch forex symbols: {e}")
+    exit(1)
 
 # Function to fetch forex data from Polygon.io
 def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
@@ -92,19 +123,24 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
 
             if response.status_code == 429:
                 wait = 60 * (attempt + 1)
-                print(f"  ⚠️  Rate limited (429). Waiting {wait}s before retry {attempt + 1}/3...")
+                logger.warning(f"Rate limited (429) for {from_currency}/{to_currency}. Waiting {wait}s before retry {attempt + 1}/3...")
                 time.sleep(wait)
                 continue
+
+            if response.status_code == 403:
+                # Free-tier restriction or future date — no point retrying
+                logger.warning(f"Polygon.io 403 Forbidden for {from_currency}/{to_currency} on {date_str} (plan restriction or date not yet available)")
+                return None
 
             response.raise_for_status()
             data = response.json()
 
             if data.get('status') == 'ERROR':
-                print(f"  ❌ Polygon API Error: {data.get('error')}")
+                logger.error(f"Polygon API Error for {from_currency}/{to_currency}: {data.get('error')}")
                 return None
 
             if data.get('resultsCount', 0) == 0:
-                print(f"  ⚠️  No data returned from Polygon for {date_str}")
+                logger.warning(f"No data returned from Polygon for {from_currency}/{to_currency} on {date_str}")
                 return None
 
             result = data['results'][0]
@@ -118,12 +154,12 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
             }
 
         except requests.exceptions.Timeout:
-            print(f"  ❌ Request timeout (attempt {attempt + 1}/3)")
+            logger.warning(f"Request timeout for {from_currency}/{to_currency} (attempt {attempt + 1}/3)")
         except Exception as e:
-            print(f"  ❌ Error fetching data: {e}")
+            logger.error(f"Error fetching data for {from_currency}/{to_currency}: {e}")
             return None
 
-    print(f"  ❌ All retries exhausted for {from_currency}/{to_currency}")
+    logger.error(f"All retries exhausted for {from_currency}/{to_currency}")
     return None
 
 # Calculate target trading day: try today first, fallback to previous trading day
@@ -150,8 +186,7 @@ else:
 
 target_day_str = target_day.strftime('%Y-%m-%d')
 fallback_day_str = fallback_day.strftime('%Y-%m-%d')
-print(f"📅 Primary target date: {target_day_str}")
-print(f"📅 Fallback date: {fallback_day_str}")
+logger.info(f"Primary target date: {target_day_str} | Fallback date: {fallback_day_str}")
 
 # Process each forex pair
 success_count = 0
@@ -159,17 +194,17 @@ error_count = 0
 
 for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(forex_symbols, 1):
     try:
-        print(f"\n[{idx}/{len(forex_symbols)}] 🔄 Processing {symbol} ({currency_from}/{currency_to})...")
+        logger.info(f"[{idx}/{len(forex_symbols)}] Processing {symbol} ({currency_from}/{currency_to})...")
         
         # Fetch data from Polygon.io — try today first, fallback to previous day
         forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, target_day.date())
 
         if not forex_data and target_day.date() != fallback_day.date():
-            print(f"  ℹ️  Today's data not available yet, trying fallback date {fallback_day_str}...")
+            logger.info(f"Today's data not available yet, trying fallback date {fallback_day_str}...")
             forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, fallback_day.date())
         
         if not forex_data:
-            print(f"  ⚠️  No data found for {symbol}. Skipping...")
+            logger.warning(f"No data found for {symbol}. Skipping.")
             error_count += 1
             continue
         
@@ -220,7 +255,7 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
                 daily_change, daily_change_pct, previous_close,
                 symbol, trading_date
             ))
-            print(f"  ✅ Updated {symbol} for {trading_date}")
+            logger.info(f"Updated {symbol} for {trading_date}")
         else:
             # Insert new record
             insert_query = f"""
@@ -237,18 +272,17 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
                 open_price, high_price, low_price, close_price, volume,
                 daily_change, daily_change_pct, previous_close
             ))
-            print(f"  ✅ Inserted {symbol} for {trading_date}")
+            logger.info(f"Inserted {symbol} for {trading_date}")
         
         conn.commit()
         success_count += 1
         
         # Rate limiting - minimal wait for Polygon.io paid tier
         if idx < len(forex_symbols):
-            print(f"  ⏳ Waiting {API_WAIT_TIME} second (rate limit)...")
             time.sleep(API_WAIT_TIME)
             
     except Exception as e:
-        print(f"❌ Error processing {symbol}: {str(e)}")
+        logger.error(f"Error processing {symbol}: {str(e)}")
         error_count += 1
         conn.rollback()
         continue
@@ -258,10 +292,8 @@ cursor.close()
 conn.close()
 
 # Summary
-print("\n" + "="*60)
-print("📊 FOREX DATA UPDATE SUMMARY (Polygon.io API)")
-print("="*60)
-print(f"✅ Successfully processed: {success_count} records")
-print(f"❌ Errors: {error_count} records")
-print(f"📅 Target date: {target_day_str} | Fallback: {fallback_day_str}")
-print("="*60)
+logger.info("=" * 60)
+logger.info("FOREX DATA UPDATE SUMMARY (Polygon.io API)")
+logger.info(f"Successfully processed: {success_count} records | Errors: {error_count} records")
+logger.info(f"Target date: {target_day_str} | Fallback: {fallback_day_str}")
+logger.info("=" * 60)

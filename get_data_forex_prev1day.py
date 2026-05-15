@@ -3,12 +3,14 @@
 # Uses Polygon.io API for accurate forex data
 import os
 import logging
+import argparse
 import pandas as pd
 import pyodbc
 import requests
 from datetime import datetime, timedelta
 import time
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 import sys
 
@@ -41,6 +43,16 @@ logger = logging.getLogger(__name__)
 logger.info("=" * 60)
 logger.info("get_data_forex_prev1day.py started")
 logger.info(f"Script dir: {SCRIPT_DIR} | CWD: {os.getcwd()}")
+
+# CLI args
+parser = argparse.ArgumentParser(description="Load Forex daily bars into forex_hist_data")
+parser.add_argument(
+    "--target-date",
+    type=str,
+    default=None,
+    help="Specific date to load in YYYY-MM-DD format. If omitted, ET 5 PM cutoff logic is used."
+)
+args = parser.parse_args()
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
@@ -162,30 +174,69 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
     logger.error(f"All retries exhausted for {from_currency}/{to_currency}")
     return None
 
-# Calculate target trading day: try today first, fallback to previous trading day
-today = datetime.now()
+# Calculate target trading day based on ET 5 PM forex daily close
+def get_previous_trading_day(reference_date, steps_back=1):
+    """
+    Return the previous weekday date stepping back `steps_back` trading days.
+    Trading day here means Mon-Fri (weekends excluded).
+    """
+    d = reference_date
+    moved = 0
+    while moved < steps_back:
+        d = d - timedelta(days=1)
+        if d.weekday() < 5:  # Mon-Fri
+            moved += 1
+    return d
 
-# Primary target is today (forex daily bar closes at 5 PM EST)
-target_day = today
 
-# If weekend, adjust to Friday
-if today.weekday() == 5:  # Saturday
-    target_day = today - timedelta(days=1)  # Friday
-elif today.weekday() == 6:  # Sunday
-    target_day = today - timedelta(days=2)  # Friday
+def get_target_and_fallback_days(now_et):
+    """
+    Determine target/fallback trading days using ET close cutoff (5:00 PM ET).
 
-# Fallback: previous trading day (in case API hasn't updated yet)
-if today.weekday() == 0:  # Monday
-    fallback_day = today - timedelta(days=3)  # Friday
-elif today.weekday() == 6:  # Sunday
-    fallback_day = today - timedelta(days=2)  # Friday
-elif today.weekday() == 5:  # Saturday
-    fallback_day = today - timedelta(days=1)  # Friday
+    Rules:
+    - Weekdays at/after 5:00 PM ET: target = today
+    - Weekdays before 5:00 PM ET: target = previous trading day
+    - Weekends: target = previous trading day (Friday)
+    - fallback = trading day before target
+    """
+    close_cutoff = now_et.replace(hour=17, minute=0, second=0, microsecond=0)
+    today_et_date = now_et.date()
+
+    if now_et.weekday() >= 5:  # Saturday/Sunday
+        target = get_previous_trading_day(today_et_date, steps_back=1)
+    elif now_et >= close_cutoff:
+        target = today_et_date
+    else:
+        target = get_previous_trading_day(today_et_date, steps_back=1)
+
+    fallback = get_previous_trading_day(target, steps_back=1)
+    return target, fallback
+
+
+def parse_target_date(value):
+    """Parse YYYY-MM-DD string to date, returning None when not supplied."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error(f"Invalid --target-date '{value}'. Expected format: YYYY-MM-DD")
+        exit(1)
+
+
+now_et = datetime.now(ZoneInfo("America/New_York"))
+cli_target_date = parse_target_date(args.target_date)
+
+if cli_target_date:
+    target_day = cli_target_date
+    fallback_day = cli_target_date  # exact-date load by default when override is provided
+    logger.info(f"Using CLI override date: {cli_target_date.strftime('%Y-%m-%d')}")
 else:
-    fallback_day = today - timedelta(days=1)
+    target_day, fallback_day = get_target_and_fallback_days(now_et)
 
 target_day_str = target_day.strftime('%Y-%m-%d')
 fallback_day_str = fallback_day.strftime('%Y-%m-%d')
+logger.info(f"Current ET time: {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 logger.info(f"Primary target date: {target_day_str} | Fallback date: {fallback_day_str}")
 
 # Process each forex pair
@@ -196,12 +247,12 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
     try:
         logger.info(f"[{idx}/{len(forex_symbols)}] Processing {symbol} ({currency_from}/{currency_to})...")
         
-        # Fetch data from Polygon.io — try today first, fallback to previous day
-        forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, target_day.date())
+        # Fetch data from Polygon.io — try primary date first, then fallback date
+        forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, target_day)
 
-        if not forex_data and target_day.date() != fallback_day.date():
-            logger.info(f"Today's data not available yet, trying fallback date {fallback_day_str}...")
-            forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, fallback_day.date())
+        if not forex_data and target_day != fallback_day:
+            logger.info(f"Primary date not available, trying fallback date {fallback_day_str}...")
+            forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, fallback_day)
         
         if not forex_data:
             logger.warning(f"No data found for {symbol}. Skipping.")
@@ -277,7 +328,7 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
         conn.commit()
         success_count += 1
         
-        # Rate limiting - minimal wait for Polygon.io paid tier
+        # Rate limiting for Polygon free tier safety
         if idx < len(forex_symbols):
             time.sleep(API_WAIT_TIME)
             

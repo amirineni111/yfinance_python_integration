@@ -1,6 +1,6 @@
 # This py script runs daily using Windows Task Scheduler to get previous day data for Forex pairs
 # Reads forex symbols from dbo.forex_master table and inserts into dbo.forex_hist_data
-# Uses Polygon.io API for accurate forex data
+# Uses OANDA v20 REST API for accurate forex data
 import os
 import logging
 import argparse
@@ -60,12 +60,18 @@ database = "stockdata_db"
 source_table = "forex_master"
 target_table = "forex_hist_data"
 
-# Polygon.io API Configuration (replaces Alpha Vantage)
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
-if not POLYGON_API_KEY:
-    logger.error("POLYGON_API_KEY not found in .env file. Exiting.")
+# OANDA v20 REST API Configuration
+OANDA_API_TOKEN = os.getenv("OANDA_API_TOKEN")
+if not OANDA_API_TOKEN:
+    logger.error("OANDA_API_TOKEN not found in .env file. Exiting.")
     exit(1)
-API_WAIT_TIME = 12   # 5 calls/min limit on Polygon — 12s gap keeps safely under
+OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")  # "practice" or "live"
+OANDA_BASE_URL = (
+    "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice"
+    else "https://api-fxtrade.oanda.com"
+)
+API_WAIT_TIME = 1   # OANDA allows 120 req/s; small delay between pairs is sufficient
+logger.info(f"OANDA environment: {OANDA_ENVIRONMENT} | Base URL: {OANDA_BASE_URL}")
 
 # Connect to SQL Server
 try:
@@ -96,15 +102,16 @@ try:
         exit(1)
     
     logger.info(f"Found {len(forex_symbols)} active forex pairs to process.")
-    logger.info("Using Polygon.io API for data retrieval.")
+    logger.info("Using OANDA v20 REST API for data retrieval.")
 except Exception as e:
     logger.error(f"Failed to fetch forex symbols: {e}")
     exit(1)
 
-# Function to fetch forex data from Polygon.io
-def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
+# Function to fetch forex data from OANDA v20 REST API
+def fetch_forex_latest(from_currency, to_currency, api_token, target_date, oanda_base_url):
     """
-    Fetch forex data from Polygon.io for a specific date
+    Fetch forex daily mid-price candle from OANDA v20 REST API for a specific date.
+    Daily bars are aligned to 17:00 New York time (standard forex NY close convention).
 
     Parameters:
     -----------
@@ -112,26 +119,43 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
         Base currency (e.g., 'AUD', 'EUR')
     to_currency : str
         Quote currency (e.g., 'USD')
-    api_key : str
-        Polygon.io API key
+    api_token : str
+        OANDA v20 personal access token
     target_date : date
         Target trading date
+    oanda_base_url : str
+        OANDA API base URL (practice or live environment)
 
     Returns:
     --------
     dict or None: Trading data for the target date
     """
-    symbol = f"C:{from_currency}{to_currency}"
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{date_str}/{date_str}"
+    # OANDA instrument format: EUR_USD, GBP_USD, etc.
+    instrument = f"{from_currency}_{to_currency}"
+    # Fetch a 3-day window to reliably capture the target date's daily bar.
+    # OANDA daily bars are anchored to 17:00 New York time, so the bar labelled
+    # with time T21:00:00Z (5pm EDT) represents the next calendar day's trading.
+    # A generous window ensures we always capture the right complete candle.
+    from_dt = f"{(target_date - timedelta(days=2)).strftime('%Y-%m-%d')}T00:00:00Z"
+    to_dt = f"{(target_date + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00Z"
+
+    url = f"{oanda_base_url}/v3/instruments/{instrument}/candles"
+    headers = {
+        'Authorization': f'Bearer {api_token}',
+        'Accept-Datetime-Format': 'RFC3339',
+    }
     params = {
-        'apiKey': api_key,
-        'adjusted': 'true'
+        'price': 'M',                          # Mid prices (bid/ask average)
+        'granularity': 'D',                    # Daily bars
+        'from': from_dt,
+        'to': to_dt,
+        'dailyAlignment': '17',                # 5pm NY close convention
+        'alignmentTimezone': 'America/New_York',
     }
 
     for attempt in range(3):
         try:
-            response = requests.get(url, params=params, timeout=30)
+            response = requests.get(url, headers=headers, params=params, timeout=30)
 
             if response.status_code == 429:
                 wait = 60 * (attempt + 1)
@@ -139,30 +163,35 @@ def fetch_forex_latest(from_currency, to_currency, api_key, target_date):
                 time.sleep(wait)
                 continue
 
-            if response.status_code == 403:
-                # Free-tier restriction or future date — no point retrying
-                logger.warning(f"Polygon.io 403 Forbidden for {from_currency}/{to_currency} on {date_str} (plan restriction or date not yet available)")
+            if response.status_code == 401:
+                logger.error(f"OANDA 401 Unauthorized for {from_currency}/{to_currency} — check OANDA_API_TOKEN in .env")
+                return None
+
+            if response.status_code == 404:
+                logger.warning(f"OANDA 404 — instrument {instrument} not found or not supported on this account")
                 return None
 
             response.raise_for_status()
             data = response.json()
 
-            if data.get('status') == 'ERROR':
-                logger.error(f"Polygon API Error for {from_currency}/{to_currency}: {data.get('error')}")
+            # Filter to complete candles only (incomplete = still forming in current session)
+            candles = [c for c in data.get('candles', []) if c.get('complete', False)]
+
+            if not candles:
+                logger.warning(f"No complete candle data from OANDA for {from_currency}/{to_currency} on {target_date}")
                 return None
 
-            if data.get('resultsCount', 0) == 0:
-                logger.warning(f"No data returned from Polygon for {from_currency}/{to_currency} on {date_str}")
-                return None
+            # Take the last complete candle in the window (closest to target date)
+            candle = candles[-1]
+            mid = candle['mid']
 
-            result = data['results'][0]
             return {
                 'trading_date': target_date,
-                'open_price': float(result['o']),
-                'high_price': float(result['h']),
-                'low_price': float(result['l']),
-                'close_price': float(result['c']),
-                'volume': int(result.get('v', 0))
+                'open_price': float(mid['o']),
+                'high_price': float(mid['h']),
+                'low_price': float(mid['l']),
+                'close_price': float(mid['c']),
+                'volume': int(candle.get('volume', 0))  # Tick volume (price tick count)
             }
 
         except requests.exceptions.Timeout:
@@ -247,12 +276,12 @@ for idx, (symbol, currency_from, currency_to, yfinance_symbol) in enumerate(fore
     try:
         logger.info(f"[{idx}/{len(forex_symbols)}] Processing {symbol} ({currency_from}/{currency_to})...")
         
-        # Fetch data from Polygon.io — try primary date first, then fallback date
-        forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, target_day)
+        # Fetch data from OANDA — try primary date first, then fallback date
+        forex_data = fetch_forex_latest(currency_from, currency_to, OANDA_API_TOKEN, target_day, OANDA_BASE_URL)
 
         if not forex_data and target_day != fallback_day:
             logger.info(f"Primary date not available, trying fallback date {fallback_day_str}...")
-            forex_data = fetch_forex_latest(currency_from, currency_to, POLYGON_API_KEY, fallback_day)
+            forex_data = fetch_forex_latest(currency_from, currency_to, OANDA_API_TOKEN, fallback_day, OANDA_BASE_URL)
         
         if not forex_data:
             logger.warning(f"No data found for {symbol}. Skipping.")
@@ -344,7 +373,7 @@ conn.close()
 
 # Summary
 logger.info("=" * 60)
-logger.info("FOREX DATA UPDATE SUMMARY (Polygon.io API)")
+logger.info("FOREX DATA UPDATE SUMMARY (OANDA v20 REST API)")
 logger.info(f"Successfully processed: {success_count} records | Errors: {error_count} records")
 logger.info(f"Target date: {target_day_str} | Fallback: {fallback_day_str}")
 logger.info("=" * 60)

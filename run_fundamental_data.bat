@@ -9,6 +9,9 @@ echo ========================================
 
 cd /d "C:\Users\sreea\OneDrive\Documents\stockanalysis"
 
+REM Activate virtual environment
+call venv\Scripts\activate.bat
+
 REM Default to 'all' if no argument provided
 set MARKET=%1
 if "%MARKET%"=="" set MARKET=all

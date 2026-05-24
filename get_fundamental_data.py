@@ -6,15 +6,41 @@ from datetime import datetime
 import time
 import argparse
 import smtplib
+import sys
 import os
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# ✅ Setup logging (file + console, matching market_context_daily pattern)
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+log_file = os.path.join(log_dir, "fundamental_data.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ✅ Parse command-line arguments
 parser = argparse.ArgumentParser(description="Fetch fundamental data for NSE and/or NASDAQ stocks")
 parser.add_argument('--market', choices=['nse', 'nasdaq', 'all'], default='all',
                     help='Which market to fetch: nse, nasdaq, or all (default: all)')
 args = parser.parse_args()
+
+# ✅ Log startup info
+logger.info("=" * 60)
+logger.info("Fundamental Data ETL started")
+logger.info(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+logger.info(f"Python: {sys.executable} ({sys.version.split()[0]})")
+logger.info(f"Market: {args.market}")
+logger.info("=" * 60)
 
 # SQL Server Connection Details
 server = "localhost\\MSSQLSERVER01"
@@ -36,10 +62,10 @@ try:
         f"Trusted_Connection=yes;"
     )
     cursor = conn.cursor()
-    print("✅ Connected to SQL Server successfully.")
+    logger.info("Connected to SQL Server successfully.")
 except Exception as e:
-    print("❌ Failed to connect to SQL Server:", e)
-    exit()
+    logger.error(f"Failed to connect to SQL Server: {e}")
+    sys.exit(1)
 
 # ✅ Create fundamental data tables
 def create_fundamental_tables():
@@ -140,7 +166,7 @@ def create_fundamental_tables():
     cursor.execute(nse_table_query)
     cursor.execute(nasdaq_table_query)
     conn.commit()
-    print("✅ Fundamental tables created successfully.")
+    logger.info("Fundamental tables ready.")
 
 create_fundamental_tables()
 
@@ -148,10 +174,9 @@ create_fundamental_tables()
 def send_failure_email(subject, body):
     """Send email notification when failures occur."""
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-        print("⚠ Email not configured. Set STOCK_EMAIL_SENDER, STOCK_EMAIL_PASSWORD, STOCK_EMAIL_RECIPIENT env vars.")
-        print(f"📧 Would have sent email:")
-        print(f"   Subject: {subject}")
-        print(f"   Body: {body[:500]}")
+        logger.warning("Email not configured. Set STOCK_EMAIL_SENDER, STOCK_EMAIL_PASSWORD, STOCK_EMAIL_RECIPIENT env vars.")
+        logger.warning(f"Would have sent email — Subject: {subject}")
+        logger.warning(f"Body (first 500 chars): {body[:500]}")
         return
 
     try:
@@ -165,9 +190,9 @@ def send_failure_email(subject, body):
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
-        print(f"📧 Failure notification email sent to {EMAIL_RECIPIENT}")
+        logger.info(f"Failure notification email sent to {EMAIL_RECIPIENT}")
     except Exception as e:
-        print(f"❌ Failed to send email notification: {e}")
+        logger.error(f"Failed to send email notification: {e}")
 
 # ✅ Function to fetch fundamental data
 def fetch_fundamentals(ticker):
@@ -227,7 +252,7 @@ def fetch_fundamentals(ticker):
         
         return fundamentals
     except Exception as e:
-        print(f"⚠ Error fetching fundamentals for {ticker}: {e}")
+        logger.warning(f"Error fetching fundamentals for {ticker}: {e}")
         return None
 
 # ✅ Batch size for DB inserts (accumulate N tickers before committing)
@@ -343,17 +368,17 @@ def insert_fundamentals_batch(batch, target_table):
                     fundamentals['fifty_day_avg'], fundamentals['two_hundred_day_avg']
                 )
         except Exception as e:
-            print(f"   ⚠️ Error inserting {ticker}: {e}")
-            print(f"   Fundamentals data: {fundamentals}")
+            logger.error(f"Error inserting {ticker}: {e}")
+            logger.error(f"Fundamentals data: {fundamentals}")
             raise  # Re-raise to stop batch processing and identify the problematic ticker
     
     conn.commit()
-    print(f"   💾 Batch committed: {len(batch)} tickers written to {target_table}")
+    logger.info(f"Batch committed: {len(batch)} tickers written to {target_table}")
 
 # ✅ Process a market's tickers with failure tracking (batch DB inserts)
 def process_market(market_label, master_table, target_table):
     """Fetch fundamentals one ticker at a time, batch-insert to DB every BATCH_SIZE tickers."""
-    print(f"\n📊 Fetching {market_label} fundamental data...")
+    logger.info(f"Fetching {market_label} fundamental data...")
     cursor.execute(f"SELECT ticker, company_name FROM {master_table}")
     tickers = cursor.fetchall()
 
@@ -365,23 +390,23 @@ def process_market(market_label, master_table, target_table):
 
     for idx, (ticker, company_name) in enumerate(tickers, 1):
         try:
-            print(f"[{idx}/{total}] Fetching fundamentals for {ticker}...")
+            logger.info(f"[{idx}/{total}] Fetching fundamentals for {ticker}...")
             fundamentals = fetch_fundamentals(ticker)
             if fundamentals is None:
                 failed_tickers.append(ticker)
-                print(f"⚠ {ticker} — no data returned (API returned None)")
+                logger.warning(f"{ticker} — no data returned (API returned None)")
             else:
                 batch.append((ticker, company_name, fundamentals))
                 success_count += 1
-                print(f"✅ {ticker} fundamentals fetched.")
+                logger.info(f"{ticker} fundamentals fetched.")
         except Exception as e:
             failed_tickers.append(ticker)
-            print(f"❌ {ticker} failed with error: {e}")
+            logger.error(f"{ticker} failed with error: {e}")
         
         # Flush batch to DB every BATCH_SIZE tickers
         if len(batch) >= BATCH_SIZE:
             batch_num += 1
-            print(f"\n📦 Writing batch {batch_num} ({len(batch)} tickers) to {target_table}...")
+            logger.info(f"Writing batch {batch_num} ({len(batch)} tickers) to {target_table}...")
             insert_fundamentals_batch(batch, target_table)
             batch = []
         
@@ -390,13 +415,13 @@ def process_market(market_label, master_table, target_table):
     # Flush remaining tickers
     if batch:
         batch_num += 1
-        print(f"\n📦 Writing final batch {batch_num} ({len(batch)} tickers) to {target_table}...")
+        logger.info(f"Writing final batch {batch_num} ({len(batch)} tickers) to {target_table}...")
         insert_fundamentals_batch(batch, target_table)
 
     total_batches = batch_num
-    print(f"\n📊 {market_label} Summary: {success_count}/{total} succeeded, {len(failed_tickers)} failed, {total_batches} DB batch commits")
+    logger.info(f"{market_label} Summary: {success_count}/{total} succeeded, {len(failed_tickers)} failed, {total_batches} DB batch commits")
     if failed_tickers:
-        print(f"⚠ Failed tickers: {', '.join(failed_tickers[:50])}{'...' if len(failed_tickers) > 50 else ''}")
+        logger.warning(f"Failed tickers: {', '.join(failed_tickers[:50])}{'...' if len(failed_tickers) > 50 else ''}")
 
     return success_count, failed_tickers, total
 
@@ -410,7 +435,7 @@ if args.market in ('nse', 'all'):
         if nse_failed:
             all_failures['NSE 500'] = (nse_failed, nse_total, nse_success)
     except Exception as e:
-        print(f"❌ NSE 500 processing crashed: {e}")
+        logger.error(f"NSE 500 processing crashed: {e}")
         all_failures['NSE 500'] = ([f'ENTIRE BATCH CRASHED: {e}'], 0, 0)
 
 if args.market in ('nasdaq', 'all'):
@@ -419,7 +444,7 @@ if args.market in ('nasdaq', 'all'):
         if nasdaq_failed:
             all_failures['NASDAQ'] = (nasdaq_failed, nasdaq_total, nasdaq_success)
     except Exception as e:
-        print(f"❌ NASDAQ processing crashed: {e}")
+        logger.error(f"NASDAQ processing crashed: {e}")
         all_failures['NASDAQ'] = ([f'ENTIRE BATCH CRASHED: {e}'], 0, 0)
 
 # ✅ Send email if there were any failures
@@ -435,12 +460,12 @@ if all_failures:
     body_lines.append(f"Script: get_fundamental_data.py")
     send_failure_email(subject, '\n'.join(body_lines))
 else:
-    print("\n🎉 All markets processed with zero failures!")
+    logger.info("All markets processed with zero failures!")
 
 # ✅ Close connection
 cursor.close()
 conn.close()
-print(f"\n✅ Fundamental data fetch completed. Markets: {args.market}")
+logger.info(f"Fundamental data fetch completed. Markets: {args.market}")
 if all_failures:
-    print(f"⚠ There were failures — check email or logs above for details.")
-    exit(1)  # Non-zero exit so batch file can detect failure
+    logger.warning(f"There were failures — check {log_file} or email for details.")
+    sys.exit(1)  # Non-zero exit so batch file can detect failure

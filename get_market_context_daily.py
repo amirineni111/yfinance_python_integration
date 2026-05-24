@@ -20,6 +20,7 @@ import numpy as np
 import pyodbc
 import argparse
 import logging
+import sys
 import os
 from datetime import datetime, timedelta
 
@@ -362,6 +363,7 @@ def main():
     logger.info("=" * 60)
     logger.info("Market Context Daily ETL")
     logger.info(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Python: {sys.executable} ({sys.version.split()[0]})")
     logger.info("=" * 60)
 
     conn = connect_db()

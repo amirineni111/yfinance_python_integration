@@ -2,7 +2,21 @@
 import yfinance as yf
 import pandas as pd
 import pyodbc
+import logging
+import os
 from datetime import datetime, timedelta
+
+# Logging setup
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, 'nasdaq_stock_fetch.log')),
+        logging.StreamHandler()
+    ]
+)
 
 # SQL Server connection setup
 server = "localhost\\MSSQLSERVER01"
@@ -55,63 +69,69 @@ if not nasdaq100_tickers:
 
 # Loop through tickers
 for ticker, company_name in nasdaq100_tickers:
-    cursor.execute(f"SELECT MAX(trading_date) FROM {target_table} WHERE ticker = ?", ticker)
-    max_date = cursor.fetchone()[0]
+    try:
+        cursor.execute(f"SELECT MAX(trading_date) FROM {target_table} WHERE ticker = ?", ticker)
+        max_date = cursor.fetchone()[0]
 
-    # Determine start date
-    if max_date:
-        start_date = max_date + timedelta(days=1)
-    else:
-        start_date = datetime.today() - timedelta(days=365)
+        # Determine start date
+        if max_date:
+            start_date = max_date + timedelta(days=1)
+        else:
+            start_date = datetime.today() - timedelta(days=365)
 
-    end_date = datetime.today() + timedelta(days=1)
+        end_date = datetime.today() + timedelta(days=1)
 
-    print(f"📊 {ticker}: Fetching from {start_date} to {end_date}...")
+        logging.info(f"{ticker}: Fetching from {start_date} to {end_date}...")
 
 
-    stock = yf.Ticker(ticker)
-    data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), interval="1d")
+        stock = yf.Ticker(ticker)
+        data = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'), interval="1d")
 
-    if data.empty:
-        print(f"⚠ No data for {ticker}. Skipping.")
-        continue
-
-    data = data.reset_index().rename(columns={"Date": "trading_date"})
-    data["Ticker"] = ticker
-    data["Company"] = company_name
-
-    inserted = 0
-    skipped = 0
-    for _, row in data.iterrows():
-        trade_date = row['trading_date']
-        # Strip timezone if present (yfinance returns tz-aware dates)
-        if hasattr(trade_date, 'tz') and trade_date.tz is not None:
-            trade_date = trade_date.tz_localize(None)
-
-        # Check if record already exists for this ticker + date
-        cursor.execute(
-            f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND trading_date = ?",
-            ticker, trade_date
-        )
-        if cursor.fetchone()[0] > 0:
-            skipped += 1
+        if data.empty:
+            logging.warning(f"{ticker}: No data returned. Skipping.")
             continue
 
-        insert_query = f"""
-        INSERT INTO {target_table} (trading_date, open_price, high_price, low_price, close_price, volume, dividend, stocksplit, ticker, company)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        cursor.execute(insert_query, trade_date, row['Open'], row['High'], row['Low'], row['Close'],
-                       row['Volume'], row['Dividends'], row['Stock Splits'], row['Ticker'], row['Company'])
-        inserted += 1
+        data = data.reset_index().rename(columns={"Date": "trading_date"})
+        data["Ticker"] = ticker
+        data["Company"] = company_name
 
-    conn.commit()
-    if skipped > 0:
-        print(f"⚠ {ticker}: {inserted} inserted, {skipped} skipped (already exist)")
-    else:
-        print(f"✅ {ticker}: {inserted} rows inserted.")
+        inserted = 0
+        skipped = 0
+        for _, row in data.iterrows():
+            trade_date = row['trading_date']
+            # Strip timezone if present (yfinance returns tz-aware dates)
+            if hasattr(trade_date, 'tz') and trade_date.tz is not None:
+                trade_date = trade_date.tz_localize(None)
+
+            # Check if record already exists for this ticker + date
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {target_table} WHERE ticker = ? AND trading_date = ?",
+                ticker, trade_date
+            )
+            if cursor.fetchone()[0] > 0:
+                skipped += 1
+                continue
+
+            insert_query = f"""
+            INSERT INTO {target_table} (trading_date, open_price, high_price, low_price, close_price, volume, dividend, stocksplit, ticker, company)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            stock_splits = row.get('Stock Splits', row.get('Capital Gains', 0))
+            cursor.execute(insert_query, trade_date, row['Open'], row['High'], row['Low'], row['Close'],
+                           row['Volume'], row['Dividends'], stock_splits, row['Ticker'], row['Company'])
+            inserted += 1
+
+        conn.commit()
+        if skipped > 0:
+            logging.info(f"{ticker}: {inserted} inserted, {skipped} skipped (already exist)")
+        else:
+            logging.info(f"{ticker}: {inserted} rows inserted.")
+
+    except Exception as e:
+        logging.error(f"{ticker}: FAILED — {e}")
+        continue
 
 # Clean up
 cursor.close()
 conn.close()
-print("✅ All done!")
+logging.info("All done!")
